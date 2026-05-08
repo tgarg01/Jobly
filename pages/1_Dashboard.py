@@ -9,10 +9,15 @@ from utils.db import load_jobs
 st.set_page_config(page_title="Dashboard — Jobly", page_icon=":bar_chart:", layout="wide")
 st.title(":bar_chart: Dashboard")
 
-df = load_jobs(active_only=True)
+if "user_email" not in st.session_state:
+    st.warning("Please sign in on the home page first.")
+    st.stop()
+
+user_email = st.session_state["user_email"]
+df = load_jobs(active_only=True, user_email=user_email)
 
 if df.empty:
-    st.info("No jobs in the tracker yet. Head to **Add Job** to get started!")
+    st.info("No jobs in the tracker yet. Go to the home page and search for jobs!")
     st.stop()
 
 # ── Summary Cards ──────────────────────────────────────────────────────────────
