@@ -83,15 +83,23 @@ else:
         from utils.job_search import search_jobs
         from utils.db import load_jobs, insert_job, is_duplicate
 
-        with st.spinner("Searching across job boards... This may take a minute."):
-            jobs = search_jobs(
-                queries=profile["queries"],
-                user_skills=user_skills,
-                max_results_per_query=15,
-            )
+        status_box = st.empty()
+        status_box.info("Starting job search across multiple boards...")
+
+        jobs = search_jobs(
+            queries=profile["queries"],
+            user_skills=user_skills,
+            max_results_per_query=10,
+            status_container=status_box,
+        )
+
+        status_box.empty()
 
         if not jobs:
-            st.warning("No jobs found. Try adjusting your resume or uploading a more detailed one.")
+            st.warning(
+                "No jobs found. This can happen if the search service is temporarily "
+                "rate-limited. Please wait a minute and try again."
+            )
         else:
             st.info(f"Found {len(jobs)} potential jobs. Saving new ones to your tracker...")
 
