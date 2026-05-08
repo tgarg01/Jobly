@@ -1,17 +1,16 @@
-"""Job Board — your tracker diary. List, filter, take notes, mark applied."""
+"""Job Board — your tracker diary. List, filter, take notes, track outcomes."""
 
 import streamlit as st
 import pandas as pd
-from datetime import date
-from utils.db import load_jobs, mark_applied, update_job, hide_job
+from utils.db import load_jobs, mark_applied, set_job_status, update_job, hide_job
 from utils.constants import FLAG_KEYWORDS
 
 st.set_page_config(page_title="Job Board — Jobly", page_icon=":clipboard:", layout="wide")
 st.title(":clipboard: Job Tracker Diary")
 st.caption("Your personal job tracker — every job you've found, in one list. "
-           "Take notes, mark applied, and keep a running diary.")
+           "Mark applied, then update to pass or fail when you hear back.")
 
-# Sync logged-in user from URL on refresh, same as app.py.
+# Sync logged-in user from URL on refresh.
 if "user_email" not in st.session_state:
     qp_email = st.query_params.get("u")
     if qp_email and "@" in qp_email:
@@ -28,6 +27,37 @@ if df.empty:
     st.info("No active jobs yet. Go to the home page, upload your resume, and search for jobs!")
     st.stop()
 
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _is_applied(applied_date) -> bool:
+    """Robust check that handles None, pd.NaT, empty strings, and 'NaT' literals."""
+    try:
+        if applied_date is None or pd.isna(applied_date):
+            return False
+    except (TypeError, ValueError):
+        pass
+    s = str(applied_date).strip().lower()
+    return bool(s) and s not in ("nat", "none", "null", "nan")
+
+
+def _status_of(row) -> tuple[str, str]:
+    """Return (emoji, label) for the row's current status."""
+    status = str(row.get("status") or "").strip().lower()
+    comments = str(row.get("comments") or "").lower()
+    flagged = any(kw in comments for kw in FLAG_KEYWORDS)
+
+    if status == "pass":
+        return ("🟢", "Pass")
+    if status == "fail":
+        return ("🔴", "Fail")
+    if flagged:
+        return ("⚠️", "Flagged")
+    if status == "waiting" or _is_applied(row.get("applied_date")):
+        return ("🟡", "Waiting")
+    return ("⚪", "Not applied")
+
+
 # ── Sidebar Filters ────────────────────────────────────────────────────────────
 st.sidebar.header("Filters")
 
@@ -36,7 +66,10 @@ if "job_type" in df.columns:
     job_types += sorted(df["job_type"].dropna().unique().tolist())
 selected_type = st.sidebar.selectbox("Job Type", job_types)
 
-applied_filter = st.sidebar.selectbox("Applied Status", ["All", "Applied", "Not Applied"])
+status_filter = st.sidebar.selectbox(
+    "Status",
+    ["All", "Not applied", "Waiting", "Pass", "Fail", "Flagged"],
+)
 
 companies = ["All"]
 if "company" in df.columns:
@@ -53,7 +86,7 @@ sort_by = st.sidebar.selectbox(
 view_mode = st.sidebar.radio(
     "View",
     ["Compact list", "Detailed diary"],
-    help="Compact list = scan many jobs at once. Detailed diary = full notes per job.",
+    help="Compact list = scan many jobs. Detailed diary = full notes per job.",
 )
 
 # ── Apply Filters ──────────────────────────────────────────────────────────────
@@ -62,10 +95,9 @@ filtered = df.copy()
 if selected_type != "All" and "job_type" in filtered.columns:
     filtered = filtered[filtered["job_type"] == selected_type]
 
-if applied_filter == "Applied":
-    filtered = filtered[filtered["applied_date"].notna() & (filtered["applied_date"] != "")]
-elif applied_filter == "Not Applied":
-    filtered = filtered[filtered["applied_date"].isna() | (filtered["applied_date"] == "")]
+if status_filter != "All":
+    labels = filtered.apply(lambda r: _status_of(r)[1], axis=1)
+    filtered = filtered[labels == status_filter]
 
 if selected_company != "All" and "company" in filtered.columns:
     filtered = filtered[filtered["company"] == selected_company]
@@ -90,14 +122,19 @@ else:
 
 # ── Summary Bar ────────────────────────────────────────────────────────────────
 total = len(df)
-applied_count = int(df["applied_date"].notna().sum()) if "applied_date" in df.columns else 0
-pending_count = total - applied_count
+labels_all = df.apply(lambda r: _status_of(r)[1], axis=1)
+applied_count = int((labels_all.isin(["Waiting", "Pass", "Fail"])).sum())
+waiting_count = int((labels_all == "Waiting").sum())
+pass_count = int((labels_all == "Pass").sum())
+fail_count = int((labels_all == "Fail").sum())
 
-s1, s2, s3, s4 = st.columns(4)
-s1.metric("Total Jobs", total)
+s1, s2, s3, s4, s5, s6 = st.columns(6)
+s1.metric("Total", total)
 s2.metric("Applied", applied_count)
-s3.metric("Pending", pending_count)
-s4.metric("Showing", len(filtered))
+s3.metric("Waiting", waiting_count)
+s4.metric("Pass", pass_count)
+s5.metric("Fail", fail_count)
+s6.metric("Showing", len(filtered))
 
 st.markdown("---")
 
@@ -113,26 +150,40 @@ if filtered.empty:
     st.warning("No jobs match your filters.")
     st.stop()
 
+st.markdown(
+    "**Legend:** ⚪ not applied · 🟡 waiting · 🟢 pass · 🔴 fail · ⚠️ flagged"
+)
+st.markdown("")
+
+
 # ── Render Jobs ────────────────────────────────────────────────────────────────
 
-def _status_marker(applied_date, comments) -> str:
-    comment_lower = str(comments or "").lower()
-    if any(kw in comment_lower for kw in FLAG_KEYWORDS):
-        return ":red_circle:"
-    if applied_date and str(applied_date).strip():
-        return ":green_circle:"
-    return ":white_circle:"
+def _render_actions(job_id: int, status_label: str, key_prefix: str):
+    """Contextual action buttons based on current status."""
+    if status_label == "Not applied":
+        if st.button("Mark Applied", key=f"{key_prefix}_apply_{job_id}",
+                     use_container_width=True):
+            mark_applied(job_id)
+            st.rerun()
+    elif status_label == "Waiting":
+        c_pass, c_fail = st.columns(2)
+        if c_pass.button("Pass ✓", key=f"{key_prefix}_pass_{job_id}",
+                         use_container_width=True):
+            set_job_status(job_id, "pass")
+            st.rerun()
+        if c_fail.button("Fail ✗", key=f"{key_prefix}_fail_{job_id}",
+                         use_container_width=True):
+            set_job_status(job_id, "fail")
+            st.rerun()
+    else:  # Pass / Fail / Flagged
+        if st.button("Reset status", key=f"{key_prefix}_reset_{job_id}",
+                     use_container_width=True):
+            set_job_status(job_id, None)
+            st.rerun()
 
 
 if view_mode == "Compact list":
-    st.markdown(
-        "**Legend:** :white_circle: not applied · :green_circle: applied · "
-        ":red_circle: flagged (expired / irrelevant)"
-    )
-    st.markdown("")
-
-    # Header row
-    h = st.columns([0.4, 2.4, 3.4, 1.6, 0.8, 1.2, 1.2])
+    h = st.columns([0.5, 2.2, 3.0, 1.5, 0.7, 1.1, 1.6, 0.5])
     h[0].markdown("**·**")
     h[1].markdown("**Company**")
     h[2].markdown("**Job Title**")
@@ -140,6 +191,7 @@ if view_mode == "Compact list":
     h[4].markdown("**Score**")
     h[5].markdown("**Applied**")
     h[6].markdown("**Actions**")
+    h[7].markdown("**·**")
     st.divider()
 
     for _, row in filtered.iterrows():
@@ -152,8 +204,11 @@ if view_mode == "Compact list":
         job_link = row.get("job_link")
         comments = row.get("comments")
 
-        c = st.columns([0.4, 2.4, 3.4, 1.6, 0.8, 1.2, 1.2])
-        c[0].markdown(_status_marker(applied_date, comments))
+        emoji, label = _status_of(row)
+
+        c = st.columns([0.5, 2.2, 3.0, 1.5, 0.7, 1.1, 1.6, 0.5])
+        c[0].markdown(f"{emoji}<br><span style='font-size:10px'>{label}</span>",
+                      unsafe_allow_html=True)
         c[1].markdown(f"**{company}**")
         if job_link and str(job_link).strip():
             c[2].markdown(f"[{title}]({job_link})")
@@ -161,31 +216,23 @@ if view_mode == "Compact list":
             c[2].markdown(title)
         c[3].markdown(location)
         c[4].markdown(str(fit_score) if fit_score is not None else "—")
-        c[5].markdown(str(applied_date) if applied_date else "—")
+        c[5].markdown(str(applied_date) if _is_applied(applied_date) else "—")
 
         with c[6]:
-            act_a, act_b = st.columns(2)
-            with act_a:
-                if not applied_date or not str(applied_date).strip():
-                    if st.button("Applied", key=f"q_apply_{job_id}", use_container_width=True):
-                        mark_applied(job_id)
-                        st.rerun()
-                else:
-                    st.caption("✓")
-            with act_b:
-                if st.button("✕", key=f"q_hide_{job_id}", help="Remove from tracker",
-                             use_container_width=True):
-                    hide_job(job_id)
-                    st.rerun()
+            _render_actions(job_id, label, key_prefix="q")
 
-        # Notes are still editable in compact view, just collapsed
+        with c[7]:
+            if st.button("✕", key=f"q_hide_{job_id}", help="Remove from tracker"):
+                hide_job(job_id)
+                st.rerun()
+
         with st.expander("Notes", expanded=False):
             new_comment = st.text_area(
                 "Notes",
                 value=comments if comments else "",
                 key=f"q_comment_{job_id}",
                 label_visibility="collapsed",
-                placeholder="Add notes (e.g. applied via email, recruiter call set, interview scheduled)...",
+                placeholder="Add notes (e.g. recruiter call set, interview scheduled, rejection received)...",
                 height=80,
             )
             if st.button("Save Notes", key=f"q_save_{job_id}"):
@@ -209,16 +256,17 @@ else:
         posted_date = row.get("posted_date")
         added_on = row.get("added_on")
 
-        marker = _status_marker(applied_date, comments)
+        emoji, label = _status_of(row)
         score_text = f"Score: {fit_score}" if fit_score is not None else ""
 
         with st.expander(
-            f"{marker} **{company}** — {title}  |  {location}  |  {job_type}  |  {score_text}",
+            f"{emoji} *{label}* · **{company}** — {title}  |  {location}  |  {job_type}  |  {score_text}",
             expanded=False,
         ):
             detail_col, action_col = st.columns([3, 1])
 
             with detail_col:
+                st.markdown(f"**Status:** {emoji} {label}")
                 st.markdown(f"**Job Title:** {title}")
                 st.markdown(f"**Company:** {company}")
                 st.markdown(f"**Location:** {location}")
@@ -228,18 +276,15 @@ else:
                 st.markdown(f"**Skills:** {key_skills if key_skills else '—'}")
                 st.markdown(f"**Posted:** {posted_date if posted_date else '—'}")
                 st.markdown(f"**Added:** {added_on if added_on else '—'}")
-                st.markdown(f"**Applied:** {applied_date if applied_date else 'Not yet'}")
+                st.markdown(
+                    f"**Applied:** {applied_date if _is_applied(applied_date) else 'Not yet'}"
+                )
 
                 if comments:
                     st.markdown(f"**Your Notes:** {comments}")
 
             with action_col:
-                if not applied_date or not str(applied_date).strip():
-                    if st.button("Mark Applied", key=f"apply_{job_id}", use_container_width=True):
-                        mark_applied(job_id)
-                        st.rerun()
-                else:
-                    st.success("Applied!")
+                _render_actions(job_id, label, key_prefix="d")
 
                 if job_link and str(job_link).strip():
                     st.link_button("Open Job Link", str(job_link), use_container_width=True)
@@ -250,7 +295,7 @@ else:
                     value=comments if comments else "",
                     key=f"comment_{job_id}",
                     label_visibility="collapsed",
-                    placeholder="Add notes... (e.g. applied via email, heard back, interview scheduled)",
+                    placeholder="Add notes... (e.g. recruiter call, interview scheduled)",
                     height=100,
                 )
                 if st.button("Save Notes", key=f"save_{job_id}", use_container_width=True):

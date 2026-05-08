@@ -112,39 +112,41 @@ def extract_location_preferences(text: str) -> list[str]:
     return sorted(set(locations))
 
 
+def build_queries(skills: list[str], titles: list[str], locations: list[str]) -> list[str]:
+    """Build job-search queries for a specific set of locations.
+
+    Skills and titles come from the resume; locations are user-selected
+    so the same resume can search Bay Area today and Boston tomorrow.
+    """
+    queries: list[str] = []
+    top_skills = (skills or [])[:5]
+    skill_str = " ".join(top_skills[:3]) if top_skills else ""
+
+    locs = locations or ["United States"]
+    for loc in locs[:3]:
+        if skill_str:
+            queries.append(f"{skill_str} jobs {loc}")
+        for title in (titles or [])[:3]:
+            queries.append(f"{title} jobs {loc}")
+            if skill_str:
+                queries.append(f"{title} {skill_str} {loc}")
+        if not titles and not skill_str:
+            queries.append(f"jobs in {loc}")
+
+    return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
+
+
 def build_search_profile(resume_text: str, cover_letter_text: str = "") -> dict:
     """Build a search profile from resume and cover letter text."""
     combined = f"{resume_text}\n{cover_letter_text}"
     skills = extract_skills(combined)
     titles = extract_job_titles(combined)
     locations = extract_location_preferences(combined)
-
-    # Build search queries from the profile
-    queries = []
-
-    # Skill-based queries
-    top_skills = skills[:5] if skills else ["cancer biology", "oncology"]
-    skill_str = " ".join(top_skills[:3])
-    for loc in locations[:2]:
-        queries.append(f"{skill_str} jobs {loc}")
-        queries.append(f"postdoc {skill_str} {loc}")
-        queries.append(f"research scientist {skill_str} {loc}")
-
-    # Title-based queries
-    for title in titles[:3]:
-        for loc in locations[:2]:
-            queries.append(f"{title} jobs {loc}")
-
-    # Broad queries
-    queries.append("cancer biology postdoc jobs California")
-    queries.append("oncology research scientist jobs Bay Area")
-    queries.append("biotech research jobs San Francisco Bay Area")
-    queries.append("immuno-oncology jobs California")
-    queries.append("bioinformatics cancer research jobs Bay Area")
+    queries = build_queries(skills, titles, locations or ["United States"])
 
     return {
         "skills": skills,
         "titles": titles,
         "locations": locations,
-        "queries": list(dict.fromkeys(queries)),  # deduplicate, preserve order
+        "queries": queries,
     }

@@ -27,7 +27,9 @@ def get_user_profile(email: str) -> dict | None:
 
 def save_user_profile(email: str, resume_text: str, cover_letter_text: str,
                       resume_filename: str, cover_letter_filename: str,
-                      skills: list[str], search_queries: list[str]):
+                      skills: list[str], search_queries: list[str],
+                      titles: list[str] | None = None,
+                      preferred_location: str | None = None):
     """Create or update a user profile."""
     client = get_client()
     existing = get_user_profile(email)
@@ -40,6 +42,8 @@ def save_user_profile(email: str, resume_text: str, cover_letter_text: str,
         "cover_letter_filename": cover_letter_filename or None,
         "skills": json.dumps(skills),
         "search_queries": json.dumps(search_queries),
+        "titles": json.dumps(titles or []),
+        "preferred_location": preferred_location,
         "updated_at": str(date.today()),
     }
 
@@ -48,6 +52,15 @@ def save_user_profile(email: str, resume_text: str, cover_letter_text: str,
     else:
         profile_data["created_at"] = str(date.today())
         client.table("user_profiles").insert(profile_data).execute()
+
+
+def save_preferred_location(email: str, location: str):
+    """Persist the user's chosen search location."""
+    client = get_client()
+    client.table("user_profiles").update({
+        "preferred_location": location,
+        "updated_at": str(date.today()),
+    }).eq("email", email).execute()
 
 
 def delete_user_resume(email: str):
@@ -60,6 +73,7 @@ def delete_user_resume(email: str):
         "cover_letter_filename": None,
         "skills": None,
         "search_queries": None,
+        "titles": None,
         "updated_at": str(date.today()),
     }).eq("email", email).execute()
 
@@ -94,7 +108,16 @@ def update_job(job_id: int, fields: dict):
 
 
 def mark_applied(job_id: int):
-    update_job(job_id, {"applied_date": str(date.today())})
+    """Record application date and move the job into the 'waiting' state."""
+    update_job(job_id, {
+        "applied_date": str(date.today()),
+        "status": "waiting",
+    })
+
+
+def set_job_status(job_id: int, status: str | None):
+    """Set status to 'waiting', 'pass', 'fail', or None to clear."""
+    update_job(job_id, {"status": status})
 
 
 def hide_job(job_id: int):

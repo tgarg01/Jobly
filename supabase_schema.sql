@@ -1,4 +1,4 @@
--- Run this in the Supabase SQL editor once.
+-- Run this in the Supabase SQL editor.
 -- Safe to re-run: every statement is idempotent.
 
 create table if not exists public.user_profiles (
@@ -10,6 +10,8 @@ create table if not exists public.user_profiles (
     cover_letter_filename text,
     skills text,           -- JSON-encoded list[str]
     search_queries text,   -- JSON-encoded list[str]
+    titles text,           -- JSON-encoded list[str] (v2)
+    preferred_location text,  -- v2
     created_at date default current_date,
     updated_at date default current_date
 );
@@ -30,11 +32,15 @@ create table if not exists public.jobs (
     salary text,
     added_on date default current_date,
     is_active boolean default true,
-    user_email text
+    user_email text,
+    status text   -- v2: null / waiting / pass / fail
 );
 
--- Add user_email if an older `jobs` table is missing it.
+-- Migrations for older deployments:
 alter table public.jobs add column if not exists user_email text;
+alter table public.jobs add column if not exists status text;
+alter table public.user_profiles add column if not exists titles text;
+alter table public.user_profiles add column if not exists preferred_location text;
 
 -- RLS: open policies (no password auth in app yet — gated by knowing the email).
 alter table public.user_profiles enable row level security;
