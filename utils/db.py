@@ -17,7 +17,6 @@ def get_client() -> Client:
 # ── User Profiles ──────────────────────────────────────────────────────────────
 
 def get_user_profile(email: str) -> dict | None:
-    """Fetch a user profile by email. Returns None if not found."""
     client = get_client()
     result = client.table("user_profiles").select("*").eq("email", email).execute()
     if result.data:
@@ -30,7 +29,6 @@ def save_user_profile(email: str, resume_text: str, cover_letter_text: str,
                       skills: list[str], search_queries: list[str],
                       titles: list[str] | None = None,
                       preferred_location: str | None = None):
-    """Create or update a user profile."""
     client = get_client()
     existing = get_user_profile(email)
 
@@ -55,7 +53,6 @@ def save_user_profile(email: str, resume_text: str, cover_letter_text: str,
 
 
 def save_preferred_location(email: str, location: str):
-    """Persist the user's chosen search location."""
     client = get_client()
     client.table("user_profiles").update({
         "preferred_location": location,
@@ -64,7 +61,6 @@ def save_preferred_location(email: str, location: str):
 
 
 def delete_user_resume(email: str):
-    """Clear resume and cover letter data for a user."""
     client = get_client()
     client.table("user_profiles").update({
         "resume_text": None,
@@ -78,22 +74,83 @@ def delete_user_resume(email: str):
     }).eq("email", email).execute()
 
 
+# ── Configs ────────────────────────────────────────────────────────────────────
+
+def list_configs(user_email: str) -> list[dict]:
+    client = get_client()
+    result = (
+        client.table("configs").select("*")
+        .eq("user_email", user_email)
+        .order("id")
+        .execute()
+    )
+    return result.data or []
+
+
+def get_config(config_id: int) -> dict | None:
+    client = get_client()
+    result = client.table("configs").select("*").eq("id", config_id).execute()
+    return result.data[0] if result.data else None
+
+
+def create_config(user_email: str, name: str,
+                  location: str | None = None,
+                  radius_miles: int | None = None) -> dict:
+    client = get_client()
+    data = {
+        "user_email": user_email,
+        "name": name,
+        "location": location,
+        "radius_miles": radius_miles,
+    }
+    result = client.table("configs").insert(data).execute()
+    return result.data[0] if result.data else {}
+
+
+def update_config(config_id: int, fields: dict):
+    client = get_client()
+    fields = {**fields, "updated_at": str(date.today())}
+    client.table("configs").update(fields).eq("id", config_id).execute()
+    load_jobs.clear()
+
+
+def clear_config_resume_override(config_id: int):
+    update_config(config_id, {
+        "override_resume_text": None,
+        "override_cover_letter_text": None,
+        "override_resume_filename": None,
+        "override_cover_letter_filename": None,
+        "override_skills": None,
+        "override_titles": None,
+    })
+
+
+def delete_config(config_id: int):
+    """Delete a config and all its jobs."""
+    client = get_client()
+    client.table("jobs").delete().eq("config_id", config_id).execute()
+    client.table("configs").delete().eq("id", config_id).execute()
+    load_jobs.clear()
+
+
 # ── Jobs ───────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=30)
-def load_jobs(active_only: bool = True, user_email: str = None) -> pd.DataFrame:
+def load_jobs(active_only: bool = True, user_email: str = None,
+              config_id: int | None = None) -> pd.DataFrame:
     client = get_client()
     query = client.table("jobs").select("*").order("id", desc=True)
     if active_only:
         query = query.eq("is_active", True)
     if user_email:
         query = query.eq("user_email", user_email)
+    if config_id is not None:
+        query = query.eq("config_id", config_id)
     result = query.execute()
     return pd.DataFrame(result.data)
 
 
 def insert_job(row: dict) -> dict:
-    """Insert a new job. Returns the inserted row or raises on duplicate."""
     client = get_client()
     result = client.table("jobs").insert(row).execute()
     load_jobs.clear()
@@ -101,14 +158,12 @@ def insert_job(row: dict) -> dict:
 
 
 def update_job(job_id: int, fields: dict):
-    """Update any fields on a job row by id."""
     client = get_client()
     client.table("jobs").update(fields).eq("id", job_id).execute()
     load_jobs.clear()
 
 
 def mark_applied(job_id: int):
-    """Record application date and move the job into the 'waiting' state."""
     update_job(job_id, {
         "applied_date": str(date.today()),
         "status": "waiting",
@@ -116,7 +171,6 @@ def mark_applied(job_id: int):
 
 
 def set_job_status(job_id: int, status: str | None):
-    """Set status to 'waiting', 'pass', 'fail', or None to clear."""
     update_job(job_id, {"status": status})
 
 
@@ -124,8 +178,9 @@ def hide_job(job_id: int):
     update_job(job_id, {"is_active": False})
 
 
-def is_duplicate(company: str, job_title: str, user_email: str = None) -> bool:
-    df = load_jobs(active_only=False, user_email=user_email)
+def is_duplicate(company: str, job_title: str, user_email: str = None,
+                 config_id: int | None = None) -> bool:
+    df = load_jobs(active_only=False, user_email=user_email, config_id=config_id)
     if df.empty:
         return False
     mask = (

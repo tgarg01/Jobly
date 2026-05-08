@@ -2,7 +2,9 @@
 
 import streamlit as st
 import pandas as pd
-from utils.db import load_jobs, mark_applied, set_job_status, update_job, hide_job
+from utils.db import (
+    load_jobs, mark_applied, set_job_status, update_job, hide_job, list_configs,
+)
 from utils.constants import FLAG_KEYWORDS
 
 st.set_page_config(page_title="Job Board — Jobly", page_icon=":clipboard:", layout="wide")
@@ -21,10 +23,40 @@ if "user_email" not in st.session_state:
     st.stop()
 
 user_email = st.session_state["user_email"]
-df = load_jobs(active_only=True, user_email=user_email)
+
+# ── Configuration filter ──────────────────────────────────────────────────────
+configs = list_configs(user_email)
+config_options: list[tuple[str, int | None]] = (
+    [("All configurations", None)] + [(c["name"], c["id"]) for c in configs]
+)
+labels = [opt[0] for opt in config_options]
+
+# Default to the active config from the home page if any.
+default_idx = 0
+active_id = st.session_state.get("active_config_id")
+if active_id is not None:
+    for i, (_, cid) in enumerate(config_options):
+        if cid == active_id:
+            default_idx = i
+            break
+
+st.sidebar.header("Configuration")
+selected_label = st.sidebar.selectbox(
+    "Show jobs from",
+    labels,
+    index=default_idx,
+    key="board_config_picker",
+)
+selected_config_id = next(cid for label, cid in config_options if label == selected_label)
+config_label_for_caption = selected_label
+
+df = load_jobs(active_only=True, user_email=user_email, config_id=selected_config_id)
 
 if df.empty:
-    st.info("No active jobs yet. Go to the home page, upload your resume, and search for jobs!")
+    if selected_config_id is None:
+        st.info("No active jobs yet. Go to the home page, upload your resume, and search for jobs!")
+    else:
+        st.info(f"No jobs in **{config_label_for_caption}** yet — run a search from the home page.")
     st.stop()
 
 
