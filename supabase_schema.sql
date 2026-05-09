@@ -34,7 +34,9 @@ create table if not exists public.jobs (
     is_active boolean default true,
     user_email text,
     status text,    -- v2: null / waiting / pass / fail
-    config_id bigint  -- v3: which configuration this job belongs to
+    config_id bigint,  -- v3: which configuration this job belongs to
+    search_radius_miles int,  -- v4: radius the search was run at
+    search_location text       -- v4: location the search was run at
 );
 
 -- v3: per-user search configurations (each is its own tracker).
@@ -59,6 +61,8 @@ create table if not exists public.configs (
 alter table public.jobs add column if not exists user_email text;
 alter table public.jobs add column if not exists status text;
 alter table public.jobs add column if not exists config_id bigint;
+alter table public.jobs add column if not exists search_radius_miles int;
+alter table public.jobs add column if not exists search_location text;
 alter table public.user_profiles add column if not exists titles text;
 alter table public.user_profiles add column if not exists preferred_location text;
 

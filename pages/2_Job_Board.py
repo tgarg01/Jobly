@@ -54,6 +54,22 @@ config_label_for_caption = selected_label
 
 df = load_jobs(active_only=True, user_email=user_email, config_id=selected_config_id)
 
+# ── Live filter by the active config's current radius / location ──────────────
+# Each job stores the search_radius_miles and search_location it was found at.
+# When the user shrinks the radius or changes the location on the home page,
+# out-of-scope jobs vanish from the board (still in the DB; bumping the radius
+# back up brings them back). Legacy rows with NULL fields are always shown.
+if selected_config_id is not None and not df.empty:
+    active_cfg = next((c for c in configs if c["id"] == selected_config_id), None)
+    if active_cfg:
+        cur_radius = active_cfg.get("radius_miles")
+        cur_loc = active_cfg.get("location")
+        if cur_radius is not None and "search_radius_miles" in df.columns:
+            df = df[df["search_radius_miles"].fillna(0).astype(int) <= int(cur_radius)]
+        if cur_loc and "search_location" in df.columns:
+            sl = df["search_location"].fillna("")
+            df = df[(sl == "") | (sl == cur_loc)]
+
 if df.empty:
     if selected_config_id is None:
         st.info("No active jobs yet. Go to the home page, upload your resume, and search for jobs!")
@@ -140,7 +156,7 @@ keyword = st.sidebar.text_input("Keyword Search", placeholder="e.g. CRISPR, onco
 
 sort_by = st.sidebar.selectbox(
     "Sort by",
-    ["Newest First", "Fit Score", "Company A-Z", "Applied (recent first)"],
+    ["Fit Score", "Newest First", "Company A-Z", "Applied (recent first)"],
 )
 
 view_mode = st.sidebar.radio(
@@ -248,7 +264,7 @@ if view_mode == "Compact list":
     h[1].markdown("**Company**")
     h[2].markdown("**Job Title**")
     h[3].markdown("**Location**")
-    h[4].markdown("**Score**")
+    h[4].markdown("**Score / 100**")
     h[5].markdown("**Applied**")
     h[6].markdown("**Actions**")
     h[7].markdown("**·**")
@@ -275,7 +291,7 @@ if view_mode == "Compact list":
         else:
             c[2].markdown(title)
         c[3].markdown(location)
-        c[4].markdown(str(fit_score) if fit_score is not None else "—")
+        c[4].markdown(f"{fit_score}/100" if fit_score is not None else "—")
         c[5].markdown(str(applied_date) if _is_applied(applied_date) else "—")
 
         with c[6]:
@@ -317,7 +333,7 @@ else:
         added_on = row.get("added_on")
 
         emoji, label = _status_of(row)
-        score_text = f"Score: {fit_score}" if fit_score is not None else ""
+        score_text = f"Score: {fit_score}/100" if fit_score is not None else ""
 
         with st.expander(
             f"{emoji} *{label}* · **{company}** — {title}  |  {location}  |  {job_type}  |  {score_text}",
@@ -331,7 +347,7 @@ else:
                 st.markdown(f"**Company:** {company}")
                 st.markdown(f"**Location:** {location}")
                 st.markdown(f"**Type:** {job_type}")
-                st.markdown(f"**Fit Score:** {fit_score if fit_score is not None else '—'}")
+                st.markdown(f"**Fit Score:** {f'{fit_score}/100' if fit_score is not None else '—'}")
                 st.markdown(f"**Salary:** {salary if salary else '—'}")
                 st.markdown(f"**Skills:** {key_skills if key_skills else '—'}")
                 st.markdown(f"**Posted:** {posted_date if posted_date else '—'}")

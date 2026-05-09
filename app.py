@@ -12,6 +12,60 @@ from utils.db import (
 from utils.resume_parser import (
     extract_text, build_search_profile, extract_job_titles, build_queries,
 )
+from utils.locations import US_STATES, MAJOR_CITIES, REMOTE_LABEL
+
+OTHER_OPTION = "Other (type below)"
+
+
+def _render_location_picker(default_loc: str | None, default_radius: int | None,
+                            key_suffix: str) -> tuple[str, int]:
+    """Searchable selectbox + optional custom text input + radius slider.
+
+    Returns (location_string, radius_miles). location_string is "" when blank.
+    """
+    suggestions = MAJOR_CITIES + US_STATES + [REMOTE_LABEL, OTHER_OPTION]
+    pick_key = f"loc_pick_{key_suffix}"
+    other_key = f"loc_other_{key_suffix}"
+    radius_key = f"radius_input_{key_suffix}"
+    init_key = f"_loc_init_{key_suffix}"
+
+    # One-time prefill from default values. After this, the widget keys own state.
+    if not st.session_state.get(init_key):
+        if default_loc and default_loc in suggestions:
+            st.session_state[pick_key] = default_loc
+        elif default_loc:
+            st.session_state[pick_key] = OTHER_OPTION
+            st.session_state[other_key] = default_loc
+        else:
+            st.session_state[pick_key] = MAJOR_CITIES[0]
+        st.session_state[radius_key] = (
+            int(default_radius) if default_radius is not None else 25
+        )
+        st.session_state[init_key] = True
+
+    choice = st.selectbox(
+        "Search location",
+        suggestions,
+        key=pick_key,
+        help="Type to filter — e.g. 'San' for Bay Area cities, 'Cal' for California.",
+    )
+    if choice == OTHER_OPTION:
+        custom = st.text_input(
+            "Custom location",
+            key=other_key,
+            placeholder="e.g. Boulder, CO  ·  London, UK",
+        )
+        location = (custom or "").strip()
+    else:
+        location = choice
+
+    radius = st.slider(
+        "Radius (miles)",
+        min_value=0, max_value=100, step=5,
+        key=radius_key,
+        help="Use 0 for state-wide, country-wide, or remote searches.",
+    )
+    return location, int(radius)
 
 st.set_page_config(
     page_title="Jobly — Job Tracker",
@@ -139,13 +193,49 @@ st.caption(
     "To search a different location, create a new tracker."
 )
 
-# Delete tracker (only when more than one exists)
-if len(configs) > 1:
-    if st.button(
-        f"🗑 Delete {active_config['name']} and all its jobs",
-        type="secondary",
-    ):
-        st.session_state["confirm_delete_cfg"] = True
+# Rename + Delete tracker actions
+ren_col, del_col = st.columns([1, 1])
+with ren_col:
+    if st.button("✎ Rename this tracker", use_container_width=True):
+        st.session_state["renaming_active_cfg"] = True
+with del_col:
+    if len(configs) > 1:
+        if st.button("🗑 Delete this tracker", type="secondary",
+                     use_container_width=True):
+            st.session_state["confirm_delete_cfg"] = True
+
+if st.session_state.get("renaming_active_cfg"):
+    with st.form("rename_cfg_form", clear_on_submit=False):
+        new_cfg_name = st.text_input(
+            "New name",
+            value=active_config["name"],
+            placeholder="e.g. California Search",
+        )
+        rs_col, rc_col = st.columns([1, 1])
+        save_rename = rs_col.form_submit_button(
+            "Save", type="primary", use_container_width=True,
+        )
+        cancel_rename = rc_col.form_submit_button(
+            "Cancel", use_container_width=True,
+        )
+    if save_rename:
+        nn = (new_cfg_name or "").strip()
+        if not nn:
+            st.error("Name cannot be empty.")
+        elif nn == active_config["name"]:
+            st.session_state.pop("renaming_active_cfg", None)
+            st.rerun()
+        else:
+            try:
+                update_config(active_config["id"], {"name": nn})
+                st.session_state.pop("renaming_active_cfg", None)
+                st.rerun()
+            except Exception as e:
+                # Catches the unique(user_email, name) constraint violation.
+                st.error(f"Could not rename — that name may already be in use. ({e})")
+    elif cancel_rename:
+        st.session_state.pop("renaming_active_cfg", None)
+        st.rerun()
 
 if st.session_state.get("confirm_delete_cfg"):
     st.warning(
@@ -369,6 +459,8 @@ def _run_search(location: str, radius: int | None, *, config_id: int, config_nam
                 skipped += 1
                 continue
             job["config_id"] = config_id
+            job["search_radius_miles"] = radius
+            job["search_location"] = location
             insert_job(job)
             added += 1
         except Exception as e:
@@ -400,32 +492,83 @@ if not has_effective_resume:
     st.info("Upload a resume above to enable job search.")
 
 elif saved_loc:
-    # Locked view: location was committed on first search.
-    rad_str = f" · within **{saved_radius}** miles" if saved_radius else ""
-    st.success(f"📍 Location: **{saved_loc}**{rad_str}")
-    st.caption(
-        f"Location is locked for **{active_config['name']}**. "
-        "To search a different location, click **➕ New tracker** above to create another."
-    )
-    if st.button("Run Search Again", type="primary", use_container_width=True):
-        _run_search(
-            saved_loc, saved_radius,
-            config_id=active_config["id"], config_name=active_config["name"],
-            eff_skills=eff_skills, eff_titles=eff_titles,
+    # ── Locked view: summary + Run Search Again + Edit Search Settings ────────
+    edit_flag = f"editing_settings_{active_config['id']}"
+
+    if st.session_state.get(edit_flag):
+        st.markdown("**Edit search settings**")
+        new_loc, new_radius = _render_location_picker(
+            default_loc=saved_loc,
+            default_radius=saved_radius,
+            key_suffix=f"edit_{active_config['id']}",
         )
+        save_col, cancel_col = st.columns([1, 1])
+        save_clicked = save_col.button(
+            "Save changes", type="primary", use_container_width=True,
+            disabled=not bool(new_loc.strip()),
+        )
+        cancel_clicked = cancel_col.button("Cancel", use_container_width=True)
+
+        if save_clicked:
+            new_loc_clean = new_loc.strip()
+            new_radius_db = new_radius if new_radius > 0 else None
+            old_radius_int = int(saved_radius) if saved_radius is not None else 0
+            location_changed = new_loc_clean.lower() != (saved_loc or "").strip().lower()
+            radius_increased = (new_radius or 0) > old_radius_int
+
+            try:
+                update_config(active_config["id"], {
+                    "location": new_loc_clean,
+                    "radius_miles": new_radius_db,
+                })
+            except Exception as e:
+                st.error(f"Could not save: {e}")
+                st.stop()
+
+            st.session_state.pop(edit_flag, None)
+            st.session_state.pop(f"_loc_init_edit_{active_config['id']}", None)
+
+            if location_changed or radius_increased:
+                # Broader scope — auto re-run search to fill in new area.
+                _run_search(
+                    new_loc_clean, new_radius_db,
+                    config_id=active_config["id"], config_name=active_config["name"],
+                    eff_skills=eff_skills, eff_titles=eff_titles,
+                )
+            else:
+                st.toast("Settings saved. Job Board will narrow accordingly.", icon="✅")
+            st.rerun()
+
+        if cancel_clicked:
+            st.session_state.pop(edit_flag, None)
+            st.session_state.pop(f"_loc_init_edit_{active_config['id']}", None)
+            st.rerun()
+
+    else:
+        rad_str = f" · within **{saved_radius}** miles" if saved_radius else ""
+        st.success(f"📍 Location: **{saved_loc}**{rad_str}")
+        st.caption(
+            "Increase the radius or change location via **Edit search settings** — "
+            "Job Board updates live (broader → new search runs; narrower → "
+            "out-of-scope rows hide). Or click **➕ New tracker** above for a fully separate search."
+        )
+        run_col, edit_col = st.columns([1, 1])
+        if run_col.button("Run Search Again", type="primary", use_container_width=True):
+            _run_search(
+                saved_loc, saved_radius,
+                config_id=active_config["id"], config_name=active_config["name"],
+                eff_skills=eff_skills, eff_titles=eff_titles,
+            )
+        if edit_col.button("Edit Search Settings", use_container_width=True):
+            st.session_state[edit_flag] = True
+            st.rerun()
 
 else:
-    # Unlocked: prompt for location + radius.
-    location_input = st.text_input(
-        "Where do you want to search?",
-        placeholder="e.g. San Jose, CA  ·  California  ·  London, UK  ·  Remote",
-        key=f"loc_input_{active_config['id']}",
-    )
-    radius = st.slider(
-        "Radius (miles)",
-        min_value=0, max_value=100, value=25, step=5,
-        key=f"radius_input_{active_config['id']}",
-        help="Use 0 for state-wide, country-wide, or remote searches.",
+    # ── Unlocked: first-time setup for this tracker ──────────────────────────
+    location_input, radius = _render_location_picker(
+        default_loc=None,
+        default_radius=None,
+        key_suffix=f"setup_{active_config['id']}",
     )
 
     can_search = bool(location_input.strip())
@@ -433,7 +576,6 @@ else:
                  disabled=not can_search):
         loc = location_input.strip()
         rad = radius if radius > 0 else None
-        # Lock the tracker's location/radius before running search.
         try:
             update_config(active_config["id"], {"location": loc, "radius_miles": rad})
         except Exception as e:
