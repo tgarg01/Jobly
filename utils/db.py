@@ -178,6 +178,15 @@ def hide_job(job_id: int):
     update_job(job_id, {"is_active": False})
 
 
+def delete_jobs_by_ids(ids: list[int]):
+    """Permanently delete a batch of jobs by id."""
+    if not ids:
+        return
+    client = get_client()
+    client.table("jobs").delete().in_("id", ids).execute()
+    load_jobs.clear()
+
+
 def is_duplicate(company: str, job_title: str, user_email: str = None,
                  config_id: int | None = None) -> bool:
     df = load_jobs(active_only=False, user_email=user_email, config_id=config_id)

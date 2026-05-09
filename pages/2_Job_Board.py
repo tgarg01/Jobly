@@ -4,8 +4,10 @@ import streamlit as st
 import pandas as pd
 from utils.db import (
     load_jobs, mark_applied, set_job_status, update_job, hide_job, list_configs,
+    delete_jobs_by_ids,
 )
 from utils.constants import FLAG_KEYWORDS
+from utils.job_search import _is_allowed_url
 
 st.set_page_config(page_title="Job Board — Jobly", page_icon=":clipboard:", layout="wide")
 st.title(":clipboard: Job Tracker Diary")
@@ -57,6 +59,32 @@ if df.empty:
         st.info("No active jobs yet. Go to the home page, upload your resume, and search for jobs!")
     else:
         st.info(f"No jobs in **{config_label_for_caption}** yet — run a search from the home page.")
+    st.stop()
+
+# ── Hide & offer to delete jobs with bad URLs ─────────────────────────────────
+# Older searches may have saved YouTube videos, Reddit threads, or generic
+# "best jobs" articles before the URL filter was added. Hide them from view
+# and let the user wipe them with one click.
+if "job_link" in df.columns:
+    url_ok = df["job_link"].fillna("").apply(_is_allowed_url)
+    bad_df = df[~url_ok]
+    df = df[url_ok]
+    bad_count = len(bad_df)
+    if bad_count > 0:
+        warn_col, btn_col = st.columns([3, 1])
+        warn_col.warning(
+            f"**{bad_count} jobs hidden** because their URLs aren't real job postings "
+            "(YouTube videos, blog posts, search-result pages from older searches)."
+        )
+        if btn_col.button("Delete them permanently", type="primary",
+                          use_container_width=True):
+            delete_jobs_by_ids([int(i) for i in bad_df["id"].tolist()])
+            st.toast(f"Deleted {bad_count} bad-URL jobs.")
+            st.rerun()
+
+if df.empty:
+    st.info("After filtering out bad-URL entries, no jobs remain. "
+            "Use the home page to run a fresh search.")
     st.stop()
 
 
