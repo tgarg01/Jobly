@@ -4,10 +4,12 @@ import streamlit as st
 import pandas as pd
 from utils.db import (
     load_jobs, mark_applied, set_job_status, update_job, hide_job, list_configs,
-    delete_jobs_by_ids,
+    delete_jobs_by_ids, append_note, push_followup_window,
 )
 from utils.constants import FLAG_KEYWORDS
 from utils.job_search import _is_allowed_url
+
+FOLLOWUP_WINDOW_DAYS = 14
 
 st.set_page_config(page_title="Job Board — Jobly", page_icon=":clipboard:", layout="wide")
 st.title(":clipboard: Job Tracker Diary")
@@ -212,6 +214,74 @@ s4.metric("Pass", pass_count)
 s5.metric("Fail", fail_count)
 s6.metric("Showing", len(filtered))
 
+# Pending toast from a previous save (Streamlit toasts don't survive st.rerun()
+# on their own, so we relay through session_state).
+if st.session_state.get("_note_saved_msg"):
+    st.toast(st.session_state.pop("_note_saved_msg"), icon="✅")
+
+# ── Follow-up memory: notes that asked the user a question last time ─────────
+# Every saved note records a last_note_at timestamp. We surface waiting-status
+# jobs whose note is recent so the user is asked next visit whether the
+# situation has progressed (got the offer? rejected? still pending?). This is
+# the personal "memory" of what each user has in flight — driven by their own
+# notes, not anything generic.
+if "last_note_at" in df.columns and "status" in df.columns:
+    fu = df.copy()
+    fu["_lna"] = pd.to_datetime(fu["last_note_at"], errors="coerce", utc=True)
+    waiting_mask = fu["status"].fillna("").str.lower().eq("waiting") | (
+        fu["status"].isna() & fu["applied_date"].apply(_is_applied)
+    )
+    cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=FOLLOWUP_WINDOW_DAYS)
+    recent_mask = fu["_lna"].notna() & (fu["_lna"] >= cutoff)
+    followups = fu[waiting_mask & recent_mask].sort_values("_lna", ascending=False)
+
+    if not followups.empty:
+        with st.expander(
+            f"📝 Follow-up — {len(followups)} note(s) waiting for an update",
+            expanded=True,
+        ):
+            st.caption(
+                "Last time you wrote these. What happened since? "
+                "Pick an outcome to keep your tracker accurate."
+            )
+            now_utc = pd.Timestamp.utcnow()
+            for _, frow in followups.iterrows():
+                jid = int(frow["id"])
+                fu_company = frow.get("company") or "—"
+                fu_title = frow.get("job_title") or "—"
+                fu_note = frow.get("comments") or ""
+                lna = frow["_lna"]
+                days_ago = max(0, int((now_utc - lna).total_seconds() // 86400))
+                stamp = "today" if days_ago == 0 else f"{days_ago} day(s) ago"
+
+                st.markdown(f"**{fu_company}** — {fu_title}")
+                st.caption(f"_{stamp}, you wrote:_  \"{fu_note}\"")
+
+                b1, b2, b3 = st.columns(3)
+                if b1.button("🟢 Got Pass", key=f"fu_pass_{jid}",
+                             use_container_width=True):
+                    set_job_status(jid, "pass")
+                    st.session_state["_note_saved_msg"] = (
+                        f"Marked **{fu_company}** as Pass."
+                    )
+                    st.rerun()
+                if b2.button("🔴 Got Fail", key=f"fu_fail_{jid}",
+                             use_container_width=True):
+                    set_job_status(jid, "fail")
+                    st.session_state["_note_saved_msg"] = (
+                        f"Marked **{fu_company}** as Fail."
+                    )
+                    st.rerun()
+                if b3.button("⏳ Still pending", key=f"fu_pending_{jid}",
+                             use_container_width=True,
+                             help="Acknowledge and bump out of the follow-up window."):
+                    push_followup_window(jid)
+                    st.session_state["_note_saved_msg"] = (
+                        f"Will check back in {FOLLOWUP_WINDOW_DAYS} days."
+                    )
+                    st.rerun()
+                st.divider()
+
 st.markdown("---")
 
 csv = filtered.to_csv(index=False).encode("utf-8")
@@ -303,17 +373,28 @@ if view_mode == "Compact list":
                 st.rerun()
 
         with st.expander("Notes", expanded=False):
-            new_comment = st.text_area(
+            note_key = f"q_comment_{job_id}"
+            # Initialize session state from DB once. Passing both `value=` and
+            # `key=` later trips Streamlit's "default value already set"
+            # exception, which is what was eating Save Notes clicks.
+            if note_key not in st.session_state:
+                st.session_state[note_key] = comments if comments else ""
+            st.text_area(
                 "Notes",
-                value=comments if comments else "",
-                key=f"q_comment_{job_id}",
+                key=note_key,
                 label_visibility="collapsed",
                 placeholder="Add notes (e.g. recruiter call set, interview scheduled, rejection received)...",
                 height=80,
             )
-            if st.button("Save Notes", key=f"q_save_{job_id}"):
-                update_job(job_id, {"comments": new_comment})
-                st.rerun()
+            if st.button("Save Notes", key=f"q_save_{job_id}", type="primary"):
+                try:
+                    append_note(job_id, st.session_state[note_key])
+                    st.session_state["_note_saved_msg"] = (
+                        f"Saved note for {company}. I'll ask you next visit."
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not save note: {e}")
 
 else:
     # Detailed diary view
@@ -366,17 +447,26 @@ else:
                     st.link_button("Open Job Link", str(job_link), use_container_width=True)
 
                 st.markdown("**Your Notes:**")
-                new_comment = st.text_area(
+                note_key = f"comment_{job_id}"
+                if note_key not in st.session_state:
+                    st.session_state[note_key] = comments if comments else ""
+                st.text_area(
                     "Notes",
-                    value=comments if comments else "",
-                    key=f"comment_{job_id}",
+                    key=note_key,
                     label_visibility="collapsed",
                     placeholder="Add notes... (e.g. recruiter call, interview scheduled)",
                     height=100,
                 )
-                if st.button("Save Notes", key=f"save_{job_id}", use_container_width=True):
-                    update_job(job_id, {"comments": new_comment})
-                    st.rerun()
+                if st.button("Save Notes", key=f"save_{job_id}",
+                             type="primary", use_container_width=True):
+                    try:
+                        append_note(job_id, st.session_state[note_key])
+                        st.session_state["_note_saved_msg"] = (
+                            f"Saved note for {company}. I'll ask you next visit."
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not save note: {e}")
 
                 st.markdown("---")
 

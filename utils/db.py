@@ -4,7 +4,7 @@ import json
 import streamlit as st
 from supabase import create_client, Client
 import pandas as pd
-from datetime import date
+from datetime import date, datetime, timezone
 
 
 @st.cache_resource
@@ -176,6 +176,54 @@ def set_job_status(job_id: int, status: str | None):
 
 def hide_job(job_id: int):
     update_job(job_id, {"is_active": False})
+
+
+def append_note(job_id: int, note_text: str) -> dict:
+    """Persist a saved note.
+
+    Writes three fields atomically so the Job Board can surface this note
+    as a follow-up next visit:
+      * `comments` — latest note text (preserved for back-compat).
+      * `notes_history` — JSON list of {text, ts}; every save appends.
+      * `last_note_at` — ISO timestamp of this save; drives follow-up filters.
+
+    Returns the updated row. Raises on DB failure so the UI can show a
+    clear error instead of silently dropping the user's note.
+    """
+    text = (note_text or "").strip()
+    if not text:
+        return {}
+
+    client = get_client()
+    existing = client.table("jobs").select("notes_history").eq("id", job_id).execute()
+    history: list = []
+    if existing.data:
+        raw = existing.data[0].get("notes_history") or "[]"
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                history = parsed
+        except (json.JSONDecodeError, TypeError):
+            history = []
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    history.append({"text": text, "ts": now_iso})
+
+    result = client.table("jobs").update({
+        "comments": text,
+        "notes_history": json.dumps(history),
+        "last_note_at": now_iso,
+    }).eq("id", job_id).execute()
+
+    load_jobs.clear()
+    return result.data[0] if result.data else {}
+
+
+def push_followup_window(job_id: int):
+    """User clicked 'still pending' — refresh the timestamp so the follow-up
+    moves to the back of the queue (out of the recent-N-day window)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    update_job(job_id, {"last_note_at": now_iso})
 
 
 def delete_jobs_by_ids(ids: list[int]):
