@@ -474,11 +474,26 @@ def _run_search(location: str, radius: int | None, *, config_id: int, config_nam
             f"({skipped} duplicates skipped, {failed} failed.) "
             "Open the **Job Board** in the sidebar to manage them."
         )
-    else:
+    elif failed > 0:
+        # Real DB error — surface it; this is the only case where re-running
+        # the schema migration is a reasonable suggestion.
         status_box.error(
-            f"Search ran but nothing was saved. {skipped} duplicates, {failed} failed. "
-            + (f"Last error: {last_error}" if last_error else
-               "If this keeps happening, re-run supabase_schema.sql.")
+            f"Search ran but **{failed}** rows failed to insert "
+            f"({skipped} were duplicates already in your tracker). "
+            + (f"Last error: {last_error}. "
+               "If this keeps happening, re-run supabase_schema.sql in Supabase."
+               if last_error else "")
+        )
+    else:
+        # Everything came back as a duplicate — that's the dedup working.
+        # Not an error; tell the user what to try if they want new postings.
+        status_box.info(
+            f"No new jobs to add — all **{skipped}** results from this search "
+            f"are already in your **{config_name}** tracker. "
+            "DDG tends to surface the same popular postings; to find fresh ones, "
+            "try (1) increasing the radius via **Edit Search Settings**, "
+            "(2) creating a new tracker with a different city, or "
+            "(3) waiting a few hours and re-running."
         )
 
 
