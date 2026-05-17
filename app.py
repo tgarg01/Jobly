@@ -591,7 +591,7 @@ st.markdown("---")
 st.markdown(
     """
     ### Pages
-    - **Dashboard** — Stats & charts
+    - **Jobs Analyzer** — Visual breakdown of the active tracker
     - **Job Board** — Tracker diary scoped to the active tracker (or all)
     """
 )
