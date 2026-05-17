@@ -178,42 +178,71 @@ def hide_job(job_id: int):
     update_job(job_id, {"is_active": False})
 
 
+def _is_missing_column_error(err: Exception) -> bool:
+    """True when a supabase-py error is about a missing column.
+
+    Lets the app keep working against an older schema that hasn't yet had
+    `supabase_schema.sql` re-run for the latest migrations.
+    """
+    msg = str(err).lower()
+    return (
+        "does not exist" in msg
+        or "notes_history" in msg
+        or "last_note_at" in msg
+        or "42703" in msg  # Postgres undefined_column SQLSTATE
+    )
+
+
 def append_note(job_id: int, note_text: str) -> dict:
-    """Persist a saved note.
+    """Persist a saved note. Saves the latest text into `comments` and (if
+    the schema is up to date) also appends to `notes_history` with a
+    timestamp + sets `last_note_at` to drive the Follow-up surface.
 
-    Writes three fields atomically so the Job Board can surface this note
-    as a follow-up next visit:
-      * `comments` — latest note text (preserved for back-compat).
-      * `notes_history` — JSON list of {text, ts}; every save appends.
-      * `last_note_at` — ISO timestamp of this save; drives follow-up filters.
-
-    Returns the updated row. Raises on DB failure so the UI can show a
-    clear error instead of silently dropping the user's note.
+    Gracefully degrades on older schemas: if the new columns don't exist,
+    the function falls back to updating just `comments` so the user's note
+    is never lost. The Follow-up memory feature simply stays inactive
+    until the schema is re-run.
     """
     text = (note_text or "").strip()
     if not text:
         return {}
 
     client = get_client()
-    existing = client.table("jobs").select("notes_history").eq("id", job_id).execute()
-    history: list = []
-    if existing.data:
-        raw = existing.data[0].get("notes_history") or "[]"
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                history = parsed
-        except (json.JSONDecodeError, TypeError):
-            history = []
-
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Read prior history, tolerating an older schema where the column is
+    # absent.
+    history: list = []
+    try:
+        existing = client.table("jobs").select("notes_history").eq("id", job_id).execute()
+        if existing.data:
+            raw = existing.data[0].get("notes_history") or "[]"
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    history = parsed
+            except (json.JSONDecodeError, TypeError):
+                history = []
+    except Exception as e:
+        if not _is_missing_column_error(e):
+            raise
+        history = []
+
     history.append({"text": text, "ts": now_iso})
 
-    result = client.table("jobs").update({
+    update_payload: dict = {
         "comments": text,
         "notes_history": json.dumps(history),
         "last_note_at": now_iso,
-    }).eq("id", job_id).execute()
+    }
+    try:
+        result = client.table("jobs").update(update_payload).eq("id", job_id).execute()
+    except Exception as e:
+        if _is_missing_column_error(e):
+            # Schema not yet migrated — save the note anyway with just `comments`.
+            result = client.table("jobs").update({"comments": text}).eq("id", job_id).execute()
+        else:
+            raise
 
     load_jobs.clear()
     return result.data[0] if result.data else {}
@@ -221,9 +250,14 @@ def append_note(job_id: int, note_text: str) -> dict:
 
 def push_followup_window(job_id: int):
     """User clicked 'still pending' — refresh the timestamp so the follow-up
-    moves to the back of the queue (out of the recent-N-day window)."""
+    moves to the back of the queue (out of the recent-N-day window).
+    No-op on older schemas without `last_note_at`."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    update_job(job_id, {"last_note_at": now_iso})
+    try:
+        update_job(job_id, {"last_note_at": now_iso})
+    except Exception as e:
+        if not _is_missing_column_error(e):
+            raise
 
 
 def delete_jobs_by_ids(ids: list[int]):
