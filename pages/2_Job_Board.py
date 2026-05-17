@@ -119,6 +119,25 @@ def _is_applied(applied_date) -> bool:
     return bool(s) and s not in ("nat", "none", "null", "nan")
 
 
+def _s(v) -> str:
+    """Pandas-safe string. Maps None / NaN / NaT to ''.
+
+    Without this, columns read from a DataFrame come back as float('nan')
+    when the underlying row is NULL. `nan` is truthy, so `value or "—"`
+    keeps it, and `str(nan)` then renders as the literal text "nan" in the
+    UI. Worse: stashing a float-nan into `st.session_state` for a text_area
+    makes Streamlit crash when it tries to serialize the widget value.
+    """
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+
 def _status_of(row) -> tuple[str, str]:
     """Return (emoji, label) for the row's current status."""
     status = str(row.get("status") or "").strip().lower()
@@ -247,9 +266,9 @@ if "last_note_at" in df.columns and "status" in df.columns:
             now_utc = pd.Timestamp.utcnow()
             for _, frow in followups.iterrows():
                 jid = int(frow["id"])
-                fu_company = frow.get("company") or "—"
-                fu_title = frow.get("job_title") or "—"
-                fu_note = frow.get("comments") or ""
+                fu_company = _s(frow.get("company")) or "—"
+                fu_title = _s(frow.get("job_title")) or "—"
+                fu_note = _s(frow.get("comments"))
                 lna = frow["_lna"]
                 days_ago = max(0, int((now_utc - lna).total_seconds() // 86400))
                 stamp = "today" if days_ago == 0 else f"{days_ago} day(s) ago"
@@ -342,13 +361,13 @@ if view_mode == "Compact list":
 
     for _, row in filtered.iterrows():
         job_id = int(row["id"])
-        company = row.get("company", "—") or "—"
-        title = row.get("job_title", "—") or "—"
-        location = row.get("location") or "—"
+        company = _s(row.get("company")) or "—"
+        title = _s(row.get("job_title")) or "—"
+        location = _s(row.get("location")) or "—"
         fit_score = row.get("fit_score")
         applied_date = row.get("applied_date")
-        job_link = row.get("job_link")
-        comments = row.get("comments")
+        job_link = _s(row.get("job_link"))
+        comments_str = _s(row.get("comments"))
 
         emoji, label = _status_of(row)
 
@@ -356,13 +375,13 @@ if view_mode == "Compact list":
         c[0].markdown(f"{emoji}<br><span style='font-size:10px'>{label}</span>",
                       unsafe_allow_html=True)
         c[1].markdown(f"**{company}**")
-        if job_link and str(job_link).strip():
+        if job_link.strip():
             c[2].markdown(f"[{title}]({job_link})")
         else:
             c[2].markdown(title)
         c[3].markdown(location)
-        c[4].markdown(f"{fit_score}/100" if fit_score is not None else "—")
-        c[5].markdown(str(applied_date) if _is_applied(applied_date) else "—")
+        c[4].markdown(f"{int(fit_score)}/100" if fit_score is not None and not pd.isna(fit_score) else "—")
+        c[5].markdown(_s(applied_date) if _is_applied(applied_date) else "—")
 
         with c[6]:
             _render_actions(job_id, label, key_prefix="q")
@@ -374,11 +393,12 @@ if view_mode == "Compact list":
 
         with st.expander("Notes", expanded=False):
             note_key = f"q_comment_{job_id}"
-            # Initialize session state from DB once. Passing both `value=` and
-            # `key=` later trips Streamlit's "default value already set"
-            # exception, which is what was eating Save Notes clicks.
-            if note_key not in st.session_state:
-                st.session_state[note_key] = comments if comments else ""
+            # Seed once; also recover from any stale non-string value (e.g.
+            # float-nan) cached in session_state from before this fix.
+            if note_key not in st.session_state or not isinstance(
+                st.session_state.get(note_key), str
+            ):
+                st.session_state[note_key] = comments_str
             st.text_area(
                 "Notes",
                 key=note_key,
@@ -400,21 +420,24 @@ else:
     # Detailed diary view
     for _, row in filtered.iterrows():
         job_id = int(row["id"])
-        company = row.get("company", "—")
-        title = row.get("job_title", "—")
-        location = row.get("location", "—") or "—"
-        job_type = row.get("job_type", "—") or "—"
+        company = _s(row.get("company")) or "—"
+        title = _s(row.get("job_title")) or "—"
+        location = _s(row.get("location")) or "—"
+        job_type = _s(row.get("job_type")) or "—"
         fit_score = row.get("fit_score")
         applied_date = row.get("applied_date")
-        salary = row.get("salary")
-        comments = row.get("comments")
-        job_link = row.get("job_link")
-        key_skills = row.get("key_skills")
-        posted_date = row.get("posted_date")
-        added_on = row.get("added_on")
+        salary = _s(row.get("salary"))
+        comments_str = _s(row.get("comments"))
+        job_link = _s(row.get("job_link"))
+        key_skills = _s(row.get("key_skills"))
+        posted_date = _s(row.get("posted_date"))
+        added_on = _s(row.get("added_on"))
 
         emoji, label = _status_of(row)
-        score_text = f"Score: {fit_score}/100" if fit_score is not None else ""
+        score_text = (
+            f"Score: {int(fit_score)}/100"
+            if fit_score is not None and not pd.isna(fit_score) else ""
+        )
 
         with st.expander(
             f"{emoji} *{label}* · **{company}** — {title}  |  {location}  |  {job_type}  |  {score_text}",
@@ -428,28 +451,34 @@ else:
                 st.markdown(f"**Company:** {company}")
                 st.markdown(f"**Location:** {location}")
                 st.markdown(f"**Type:** {job_type}")
-                st.markdown(f"**Fit Score:** {f'{fit_score}/100' if fit_score is not None else '—'}")
-                st.markdown(f"**Salary:** {salary if salary else '—'}")
-                st.markdown(f"**Skills:** {key_skills if key_skills else '—'}")
-                st.markdown(f"**Posted:** {posted_date if posted_date else '—'}")
-                st.markdown(f"**Added:** {added_on if added_on else '—'}")
+                fs_display = (
+                    f"{int(fit_score)}/100"
+                    if fit_score is not None and not pd.isna(fit_score) else "—"
+                )
+                st.markdown(f"**Fit Score:** {fs_display}")
+                st.markdown(f"**Salary:** {salary or '—'}")
+                st.markdown(f"**Skills:** {key_skills or '—'}")
+                st.markdown(f"**Posted:** {posted_date or '—'}")
+                st.markdown(f"**Added:** {added_on or '—'}")
                 st.markdown(
-                    f"**Applied:** {applied_date if _is_applied(applied_date) else 'Not yet'}"
+                    f"**Applied:** {_s(applied_date) if _is_applied(applied_date) else 'Not yet'}"
                 )
 
-                if comments:
-                    st.markdown(f"**Your Notes:** {comments}")
+                if comments_str:
+                    st.markdown(f"**Your Notes:** {comments_str}")
 
             with action_col:
                 _render_actions(job_id, label, key_prefix="d")
 
-                if job_link and str(job_link).strip():
-                    st.link_button("Open Job Link", str(job_link), use_container_width=True)
+                if job_link.strip():
+                    st.link_button("Open Job Link", job_link, use_container_width=True)
 
                 st.markdown("**Your Notes:**")
                 note_key = f"comment_{job_id}"
-                if note_key not in st.session_state:
-                    st.session_state[note_key] = comments if comments else ""
+                if note_key not in st.session_state or not isinstance(
+                    st.session_state.get(note_key), str
+                ):
+                    st.session_state[note_key] = comments_str
                 st.text_area(
                     "Notes",
                     key=note_key,
